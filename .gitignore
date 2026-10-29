@@ -1,0 +1,25 @@
+# Sekrety i lokalna konfiguracja
+.env
+.env.*
+!.env.example
+config/config.yaml
+
+# Dane i logi bota
+data/
+logs/
+*.sqlite3
+*.sqlite3-*
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/

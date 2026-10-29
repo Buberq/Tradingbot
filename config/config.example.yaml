@@ -1,0 +1,55 @@
+# Konfiguracja bota Kraken. Skopiuj do config/config.yaml i dostosuj.
+# Sekretów (kluczy, tokenów) NIE wpisuj tutaj. Trafiają do zmiennych środowiskowych
+# (lokalnie plik .env, na serwerze Secret Manager). Wzór w .env.example.
+
+# paper = symulacja na żywych cenach, zlecenia tylko zapisywane w bazie
+# live  = prawdziwe zlecenia. Wymaga też zmiennej KRAKENBOT_ALLOW_LIVE=yes.
+mode: paper
+
+paths:
+  db_path: data/krakenbot.sqlite3
+  log_dir: logs
+
+logging:
+  level: INFO
+  max_bytes: 5000000   # rotacja pliku logu
+  backup_count: 10
+
+retry:
+  max_attempts: 5
+  base_delay_s: 1.0
+  max_delay_s: 60.0
+  jitter: true
+
+kraken:
+  base_url: https://api.kraken.com
+  timeout_s: 15
+
+schedule:
+  review_interval_minutes: 60   # przegląd agentów co godzinę
+  daily_decision_hour_utc: 7    # pełna decyzja raz na dobę
+
+# Wartości startowe. Zmienialne z Telegrama (od Etapu 3), ale tylko w granicach risk_bounds.
+risk:
+  max_position_pct: 50          # maks. udział jednej pozycji w portfelu
+  max_open_positions: 10
+  cash_reserve_pct: 10          # rezerwa w EUR, nieinwestowana
+  max_loss_per_trade_pct: 2     # strata do stop-lossa jako % portfela
+  min_hold_hours: 48
+  max_new_trades_per_day: 1
+  max_new_trades_per_week: 4
+  min_expected_move_pct: 3      # próg opłacalności zakupu
+  daily_loss_limit_pct: 20      # po przekroczeniu: pauza i alert, bez wyprzedaży
+
+# Twarde granice dla zmian z Telegrama. Muszą mieścić się w granicach zapisanych w kodzie
+# (src/krakenbot/hard_rules.py). Brakujące klucze dostają granice z kodu.
+risk_bounds:
+  max_position_pct: {min: 5, max: 50}
+  max_open_positions: {min: 1, max: 10}
+  cash_reserve_pct: {min: 5, max: 90}
+  max_loss_per_trade_pct: {min: 0.5, max: 3}
+  min_hold_hours: {min: 12, max: 336}
+  max_new_trades_per_day: {min: 0, max: 3}
+  max_new_trades_per_week: {min: 0, max: 10}
+  min_expected_move_pct: {min: 2, max: 20}
+  daily_loss_limit_pct: {min: 5, max: 25}
