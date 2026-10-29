@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
@@ -71,6 +71,9 @@ class RetryConfig(_Strict):
 class KrakenConfig(_Strict):
     base_url: str = "https://api.kraken.com"
     timeout_s: float = Field(default=15.0, gt=0, le=120)
+    # Whitelista klucza zawiera adres IPv4 serwera. Gdyby system wybrał IPv6, Kraken
+    # odrzuciłby zapytanie, więc domyślnie łączymy się wyłącznie po IPv4.
+    ip_version: Literal[4, 6] = 4
 
     @model_validator(mode="after")
     def _https_only(self) -> KrakenConfig:

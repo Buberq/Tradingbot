@@ -14,7 +14,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import http.client
 import json
+import socket
 import ssl
 import threading
 import time
@@ -120,22 +122,73 @@ def _ssl_context() -> ssl.SSLContext:
     return ctx
 
 
-def urllib_transport(
-    method: str, url: str, headers: Mapping[str, str], body: bytes | None, timeout: float
-) -> HttpResponse:
-    if not url.startswith("https://"):
-        raise PermanentError(f"Odmowa połączenia bez HTTPS: {url}")
-    req = urllib.request.Request(url, data=body, headers=dict(headers), method=method)  # noqa: S310
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:  # noqa: S310
-            return HttpResponse(resp.status, resp.read())
-    except urllib.error.HTTPError as exc:
-        return HttpResponse(exc.code, exc.read() or b"")
-    except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
-        reason = getattr(exc, "reason", exc)
-        if isinstance(reason, ssl.SSLError):
-            raise PermanentError(f"Błąd TLS/certyfikatu: {reason}") from exc
-        raise KrakenTransientError(f"Błąd sieci: {reason}") from exc
+_FAMILIES = {4: socket.AF_INET, 6: socket.AF_INET6}
+
+
+def _connect_family(family: int):
+    """Odpowiednik socket.create_connection, który łączy się tylko adresami danej rodziny."""
+
+    def create_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None,
+                          *args, **kwargs):
+        host, port = address
+        last_exc: OSError | None = None
+        for af, socktype, proto, _, sockaddr in socket.getaddrinfo(
+            host, port, family, socket.SOCK_STREAM
+        ):
+            sock = socket.socket(af, socktype, proto)
+            try:
+                if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                    sock.settimeout(timeout)
+                if source_address:
+                    sock.bind(source_address)
+                sock.connect(sockaddr)
+                return sock
+            except OSError as exc:
+                last_exc = exc
+                sock.close()
+        raise last_exc or OSError(f"Brak adresów IPv{'4' if family == socket.AF_INET else '6'}"
+                                  f" dla {host}")
+
+    return create_connection
+
+
+def make_transport(ip_version: int = 4) -> Transport:
+    """Transport HTTPS przez wybraną wersję IP, bez serwerów proxy ze zmiennych środowiska."""
+    family = _FAMILIES[ip_version]
+    ctx = _ssl_context()
+
+    class _Conn(http.client.HTTPSConnection):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self._create_connection = _connect_family(family)
+
+    class _Handler(urllib.request.HTTPSHandler):
+        def https_open(self, req):  # type: ignore[override]
+            return self.do_open(_Conn, req, context=ctx)
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _Handler())
+
+    def transport(
+        method: str, url: str, headers: Mapping[str, str], body: bytes | None, timeout: float
+    ) -> HttpResponse:
+        if not url.startswith("https://"):
+            raise PermanentError(f"Odmowa połączenia bez HTTPS: {url}")
+        req = urllib.request.Request(url, data=body, headers=dict(headers), method=method)  # noqa: S310
+        try:
+            with opener.open(req, timeout=timeout) as resp:
+                return HttpResponse(resp.status, resp.read())
+        except urllib.error.HTTPError as exc:
+            return HttpResponse(exc.code, exc.read() or b"")
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+            reason = getattr(exc, "reason", exc)
+            if isinstance(reason, ssl.SSLError):
+                raise PermanentError(f"Błąd TLS/certyfikatu: {reason}") from exc
+            raise KrakenTransientError(f"Błąd sieci (IPv{ip_version}): {reason}") from exc
+
+    return transport
+
+
+urllib_transport: Transport = make_transport(4)
 
 
 def sign(url_path: str, post_data: str, nonce: str, secret_b64: str) -> str:

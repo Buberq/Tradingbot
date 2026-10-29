@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from krakenbot.config import Settings
+from krakenbot.config import RetryConfig, Settings
 from krakenbot.db import audit, connect, transaction
-from krakenbot.kraken_client import KrakenClient, KrakenError, Transport, urllib_transport
+from krakenbot.kraken_client import KrakenClient, KrakenError, Transport, make_transport
 from krakenbot.logging_setup import setup_logging
 from krakenbot.portfolio import format_valuation, pairs_to_price, save_snapshot, value_portfolio
+from krakenbot.retry import RetryExhaustedError, TransientError
 
 # Podpowiedzi dla najczęstszych błędów klucza. Kraken przy zapytaniu spoza whitelisty IP
 # zwraca błąd klucza lub uprawnień, więc pokazujemy obie możliwe przyczyny.
@@ -19,12 +20,20 @@ _HINTS = {
 }
 
 
-def make_read_client(settings: Settings, transport: Transport = urllib_transport) -> KrakenClient:
+def make_read_client(
+    settings: Settings,
+    transport: Transport | None = None,
+    retry_cfg: RetryConfig | None = None,
+) -> KrakenClient:
     s = settings.secrets
     key = s.kraken_read_key.get_secret_value() if s.kraken_read_key else None
     secret = s.kraken_read_secret.get_secret_value() if s.kraken_read_secret else None
     return KrakenClient(
-        settings.kraken, settings.retry, api_key=key, api_secret=secret, transport=transport
+        settings.kraken,
+        retry_cfg or settings.retry,
+        api_key=key,
+        api_secret=secret,
+        transport=transport or make_transport(settings.kraken.ip_version),
     )
 
 
@@ -33,28 +42,38 @@ def explain(exc: KrakenError) -> str:
     return str(exc) + (f" ({'; '.join(hints)})" if hints else "")
 
 
-def check_kraken(settings: Settings, transport: Transport = urllib_transport) -> int:
-    """Sprawdza API publiczne, a jeśli jest klucz, także prywatne (saldo). 0 = OK."""
+def check_kraken(
+    settings: Settings,
+    transport: Transport | None = None,
+    *,
+    ipv6_negative_test: bool = False,
+    ipv6_transport: Transport | None = None,
+) -> int:
+    """Sprawdza API publiczne, a jeśli jest klucz, także prywatne (saldo). 0 = OK.
+
+    Z ipv6_negative_test=True dodatkowo wysyła to samo zapytanie przez IPv6, czyli z adresu
+    spoza whitelisty. Test zalicza się tylko wtedy, gdy Kraken je ODRZUCI.
+    """
     log = setup_logging(settings)
     client = make_read_client(settings, transport)
     mode = settings.mode.value
 
     status = client.system_status()
     server_time = client.server_time()
-    log.info("Kraken publiczne API OK: status=%s, czas serwera=%d", status, server_time)
+    log.info("Kraken publiczne API OK (IPv%d): status=%s, czas serwera=%d",
+             settings.kraken.ip_version, status, server_time)
 
     missing = settings.secrets.missing("kraken_read_key", "kraken_read_secret")
     if missing:
         log.warning("Pomijam test prywatnego API, brak: %s", ", ".join(missing))
-        return 0
+        return 1 if ipv6_negative_test else 0
 
     conn = connect(settings.paths.db_path)
     try:
         try:
             balances = client.balance()
         except KrakenError as exc:
-            msg = explain(exc)
-            log.error("Kraken prywatne API ODRZUCIŁO zapytanie: %s", msg)
+            log.error("Kraken prywatne API ODRZUCIŁO zapytanie: %s", explain(exc))
             with transaction(conn):
                 audit(conn, mode=mode, category="system", event="kraken_auth_failed",
                       details={"errors": exc.errors})
@@ -63,12 +82,37 @@ def check_kraken(settings: Settings, transport: Transport = urllib_transport) ->
         with transaction(conn):
             audit(conn, mode=mode, category="system", event="kraken_auth_ok",
                   details={"kraken_status": status, "assets": sorted(balances)})
+
+        if not ipv6_negative_test:
+            return 0
+        result = _ipv6_negative(settings, ipv6_transport, log)
+        with transaction(conn):
+            audit(conn, mode=mode, category="system", event="kraken_ip_whitelist_test",
+                  details={"result": result})
+        return 0 if result == "rejected" else 1
     finally:
         conn.close()
-    return 0
 
 
-def portfolio(settings: Settings, transport: Transport = urllib_transport) -> int:
+def _ipv6_negative(settings: Settings, transport: Transport | None, log) -> str:
+    client = make_read_client(
+        settings, transport or make_transport(6), RetryConfig(max_attempts=1)
+    )
+    try:
+        client.balance()
+    except KrakenError as exc:
+        log.info("Test whitelisty ZALICZONY: zapytanie z adresu IPv6 odrzucone (%s)",
+                 ", ".join(exc.errors))
+        return "rejected"
+    except (TransientError, RetryExhaustedError) as exc:
+        log.warning("Test whitelisty NIEWYKONALNY: brak połączenia przez IPv6 (%s)", exc)
+        return "no_ipv6"
+    log.error("Test whitelisty NIEZALICZONY: Kraken PRZYJĄŁ zapytanie spoza adresu IPv4. "
+              "Sprawdź, czy whitelista klucza jest włączona i zawiera tylko adres serwera.")
+    return "accepted"
+
+
+def portfolio(settings: Settings, transport: Transport | None = None) -> int:
     """Pobiera salda i ceny, wycenia portfel w EUR i zapisuje snapshot. 0 = OK."""
     log = setup_logging(settings)
     client = make_read_client(settings, transport)

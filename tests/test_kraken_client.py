@@ -179,3 +179,33 @@ def test_https_only_and_certificate_verification():
 
 def test_doc_secret_is_valid_base64():
     assert len(base64.b64decode(DOC_SECRET)) == 64
+
+
+def test_transport_respects_ip_family(monkeypatch):
+    import socket
+
+    from krakenbot.kraken_client import _connect_family
+
+    seen = {}
+
+    def fake_getaddrinfo(host, port, family, socktype):
+        seen["family"] = family
+        raise socket.gaierror("brak adresu")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    with pytest.raises(OSError):
+        _connect_family(socket.AF_INET)(("api.kraken.com", 443), 1)
+    assert seen["family"] == socket.AF_INET
+
+
+def test_make_transport_wraps_network_errors(monkeypatch):
+    import socket
+
+    from krakenbot.kraken_client import KrakenTransientError, make_transport
+
+    def fail(*a, **k):
+        raise socket.gaierror("no AAAA record")
+
+    monkeypatch.setattr(socket, "getaddrinfo", fail)
+    with pytest.raises(KrakenTransientError, match="IPv6"):
+        make_transport(6)("GET", "https://api.kraken.com/0/public/Time", {}, None, 2)

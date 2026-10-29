@@ -17,6 +17,7 @@ from kraken_fakes import (
 from krakenbot import kraken_commands
 from krakenbot.config import load_settings
 from krakenbot.db import connect
+from krakenbot.kraken_client import KrakenTransientError
 from krakenbot.main import cli
 from krakenbot.portfolio import (
     eur_pairs,
@@ -109,7 +110,7 @@ def test_check_kraken_without_key_tests_public_only(config_file):
 
 def test_cli_portfolio_uses_transport(config_file, monkeypatch):
     t = FakeTransport(kraken_routes())
-    monkeypatch.setattr(kraken_commands, "urllib_transport", t)
+    monkeypatch.setattr(kraken_commands, "make_transport", lambda ip_version=4: t)
     monkeypatch.setenv("KRAKEN_READ_API_KEY", "pubkey")
     monkeypatch.setenv("KRAKEN_READ_API_SECRET", DOC_SECRET)
     argv = ["--config", str(config_file), "--env-file", "/nonexistent", "portfolio"]
@@ -118,9 +119,53 @@ def test_cli_portfolio_uses_transport(config_file, monkeypatch):
 
 
 def test_cli_portfolio_without_key_fails_cleanly(config_file, monkeypatch, capsys):
-    monkeypatch.setattr(kraken_commands, "urllib_transport", FakeTransport(kraken_routes()))
+    fake = FakeTransport(kraken_routes())
+    monkeypatch.setattr(kraken_commands, "make_transport", lambda ip_version=4: fake)
     monkeypatch.delenv("KRAKEN_READ_API_KEY", raising=False)
     monkeypatch.delenv("KRAKEN_READ_API_SECRET", raising=False)
     argv = ["--config", str(config_file), "--env-file", "/nonexistent", "portfolio"]
     assert cli(argv) == 1
     assert "brak klucza" in capsys.readouterr().err
+
+
+def test_ipv6_negative_test_passes_when_kraken_rejects(settings_with_key):
+    ok4 = FakeTransport(kraken_routes())
+    v6 = FakeTransport(kraken_routes(**{"/0/private/Balance": err("EAPI:Invalid key")}))
+    rc = kraken_commands.check_kraken(
+        settings_with_key, ok4, ipv6_negative_test=True, ipv6_transport=v6
+    )
+    assert rc == 0
+    assert [c.path for c in v6.calls] == ["/0/private/Balance"]
+    conn = connect(settings_with_key.paths.db_path)
+    row = conn.execute(
+        "SELECT details FROM audit_log WHERE event='kraken_ip_whitelist_test'"
+    ).fetchone()
+    assert json.loads(row[0]) == {"result": "rejected"}
+    conn.close()
+
+
+def test_ipv6_negative_test_fails_when_kraken_accepts(settings_with_key, tmp_path):
+    rc = kraken_commands.check_kraken(
+        settings_with_key,
+        FakeTransport(kraken_routes()),
+        ipv6_negative_test=True,
+        ipv6_transport=FakeTransport(kraken_routes()),
+    )
+    assert rc == 1
+    log = (tmp_path / "logs" / "krakenbot.log").read_text(encoding="utf-8")
+    assert "NIEZALICZONY" in log
+
+
+def test_ipv6_negative_test_without_ipv6_is_reported(settings_with_key, tmp_path):
+    no_v6 = FakeTransport(kraken_routes(**{"/0/private/Balance": OSError("no route")}))
+    no_v6.routes["/0/private/Balance"] = KrakenTransientError("Błąd sieci (IPv6): no route")
+    rc = kraken_commands.check_kraken(
+        settings_with_key,
+        FakeTransport(kraken_routes()),
+        ipv6_negative_test=True,
+        ipv6_transport=no_v6,
+    )
+    assert rc == 1
+    assert len(no_v6.calls) == 1  # bez ponawiania
+    log = (tmp_path / "logs" / "krakenbot.log").read_text(encoding="utf-8")
+    assert "NIEWYKONALNY" in log

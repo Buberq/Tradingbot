@@ -88,7 +88,12 @@ def cli(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("start", help="uruchom bota (Etap 1: kontrola startu i wpis do bazy)")
     sub.add_parser("check-config", help="sprawdź konfigurację i zakończ")
-    sub.add_parser("check-kraken", help="test łączności z Krakenem (publiczne i prywatne API)")
+    ck = sub.add_parser("check-kraken", help="test łączności z Krakenem (publiczne i prywatne API)")
+    ck.add_argument(
+        "--ipv6-negative-test",
+        action="store_true",
+        help="dodatkowo sprawdź, że zapytanie wysłane przez IPv6 (spoza whitelisty) jest odrzucane",
+    )
     sub.add_parser("portfolio", help="wycena portfela w EUR z Krakena i zapis snapshotu")
     args = parser.parse_args(argv)
 
@@ -110,13 +115,16 @@ def cli(argv: list[str] | None = None) -> int:
         from krakenbot import kraken_commands
         from krakenbot.retry import PermanentError, RetryExhaustedError
 
-        command = (
-            kraken_commands.check_kraken
-            if args.command == "check-kraken"
-            else kraken_commands.portfolio
-        )
+        transport = kraken_commands.make_transport(settings.kraken.ip_version)
         try:
-            return command(settings, kraken_commands.urllib_transport)
+            if args.command == "check-kraken":
+                return kraken_commands.check_kraken(
+                    settings,
+                    transport,
+                    ipv6_negative_test=args.ipv6_negative_test,
+                    ipv6_transport=kraken_commands.make_transport(6),
+                )
+            return kraken_commands.portfolio(settings, transport)
         except (PermanentError, RetryExhaustedError) as exc:
             print(f"BŁĄD: {exc}", file=sys.stderr)
             return 1
