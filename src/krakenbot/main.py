@@ -88,6 +88,8 @@ def cli(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("start", help="uruchom bota (Etap 1: kontrola startu i wpis do bazy)")
     sub.add_parser("check-config", help="sprawdź konfigurację i zakończ")
+    sub.add_parser("check-kraken", help="test łączności z Krakenem (publiczne i prywatne API)")
+    sub.add_parser("portfolio", help="wycena portfela w EUR z Krakena i zapis snapshotu")
     args = parser.parse_args(argv)
 
     load_dotenv(Path(args.env_file))
@@ -103,6 +105,21 @@ def cli(argv: list[str] | None = None) -> int:
         if missing:
             print("Brakujące sekrety (potrzebne w kolejnych etapach): " + ", ".join(missing))
         return 0
+
+    if args.command in ("check-kraken", "portfolio"):
+        from krakenbot import kraken_commands
+        from krakenbot.retry import PermanentError, RetryExhaustedError
+
+        command = (
+            kraken_commands.check_kraken
+            if args.command == "check-kraken"
+            else kraken_commands.portfolio
+        )
+        try:
+            return command(settings, kraken_commands.urllib_transport)
+        except (PermanentError, RetryExhaustedError) as exc:
+            print(f"BŁĄD: {exc}", file=sys.stderr)
+            return 1
 
     startup(settings)
     return 0

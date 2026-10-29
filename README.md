@@ -3,8 +3,9 @@
 Bot na rynek SPOT Kraken (tylko pary do EUR), z dwoma agentami LLM i Risk Managerem w kodzie.
 Plan i etapy: dokument „Bot tradingowy Kraken – plan projektu i TODO”.
 
-**Stan: Etap 1 (szkielet projektu).** Bot ładuje konfigurację, raportuje tryb, przygotowuje
-bazę i zapisuje wpis startowy. Nie łączy się jeszcze z Krakenem.
+**Stan: Etap 2 w toku (łączność z Krakenem, tylko odczyt).** Kod klienta i wycena portfela
+są gotowe i przetestowane na przykładowych odpowiedziach. Brakuje testu na żywo z serwera
+z kluczem tylko do odczytu i whitelistą IP.
 
 ## Szybki start
 
@@ -21,7 +22,20 @@ cp .env.example .env            # sekrety uzupełnisz w kolejnych etapach
 pytest                          # wszystkie testy muszą przejść
 krakenbot check-config          # walidacja konfiguracji
 krakenbot start                 # start i wpis do bazy data/krakenbot.sqlite3
+krakenbot check-kraken          # test API Kraken: publiczne, a z kluczem także prywatne
+krakenbot portfolio             # wycena portfela w EUR i snapshot w bazie (wymaga klucza)
 ```
+
+## Kraken: zasady klienta
+
+- Tylko HTTPS z weryfikacją certyfikatu (TLS 1.2+). Podpis zapytań zgodny z dokumentacją
+  Krakena (test na oficjalnym przykładzie z dokumentacji).
+- Metody wypłat i transferów są zablokowane w kodzie dla każdego klucza. Klient z kluczem
+  tylko do odczytu odrzuca też metody handlowe, zanim zapytanie wyjdzie z serwera.
+- Błędy chwilowe (przeciążenie, limity, 5xx, sieć) są ponawiane z backoffem. Błędy klucza,
+  uprawnień, nonce i blokady nie są ponawiane, bo powtórki mogą zablokować klucz.
+- Salda z sufiksem (np. `DOT.S`, `ETH.F`) to staking lub Earn: raportowane osobno,
+  niewliczane do wartości portfela, którym zarządza bot.
 
 ## Tryby pracy
 
